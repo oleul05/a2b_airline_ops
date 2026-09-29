@@ -1,0 +1,16 @@
+# Large BTS local cache
+.landing_cache/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+
+# macOS
+.DS_Store
+
+# Local secrets/env
+.env

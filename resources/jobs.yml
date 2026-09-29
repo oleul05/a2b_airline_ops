@@ -1,0 +1,23 @@
+resources:
+  jobs:
+
+    setup_job:
+      name: a2b_airline_ops_setup_${var.env}
+
+      tasks:
+        - task_key: setup
+          notebook_task:
+            notebook_path: ../src/setup/setup_objects.py
+            base_parameters:
+              catalog: "${var.catalog}"
+              env: "${var.env}"
+
+        - task_key: load_reference
+          depends_on:
+            - task_key: setup
+
+          notebook_task:
+            notebook_path: ../src/ingest/load_reference.py
+            base_parameters:
+              catalog: "${var.catalog}"
+              env: "${var.env}"

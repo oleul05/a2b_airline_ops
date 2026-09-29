@@ -1,0 +1,40 @@
+bundle:
+  name: a2b_airline_ops
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog
+    default: workspace
+
+  env:
+    description: Schema prefix for this target (dev_* or prd_*)
+    default: dev
+
+  notify_email:
+    description: Where failure notifications go
+    default: oleul0057@gmail.com
+
+  warehouse_id:
+    description: SQL warehouse for the dashboard and SQL tasks
+    lookup:
+      warehouse: "Serverless Starter Warehouse"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-37a8cec1-d5e8.cloud.databricks.com
+    variables:
+      env: dev
+
+  prod:
+    mode: production
+    workspace:
+      host: https://dbc-37a8cec1-d5e8.cloud.databricks.com
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      env: prd
