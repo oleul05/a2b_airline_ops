@@ -81,3 +81,40 @@ The temporary expectation then failed on real records, proving that
 `expect_or_fail` stops the update when violating rows are processed.
 
 The temporary rule was removed and the pipeline was successfully refreshed again.
+
+## Gold Object Design
+
+| Object | Type | Reason |
+|---|---|---|
+| gold_otp_carrier_month | Materialized View | Reusable carrier-month KPI aggregation for BI queries |
+| gold_delay_causes | Materialized View | Precomputes expensive yearly cause aggregations |
+| gold_airport_hour | Materialized View | Supports repeated airport/hour performance analysis |
+| gold_weather_impact | Materialized View | Persists flight-weather join and daily aggregation |
+| gold_aircraft_rotation | Materialized View | Reusable governed aircraft-level operational view |
+| gold_disruptions | Materialized View | Maintains a filtered operational exception dataset |
+| gold_tail_delays | Materialized View | Precomputes aircraft monthly reliability metrics |
+
+## Task 2.3 - Gold Layer
+
+All seven Gold materialized views refreshed successfully in dev.
+
+| Object | Rows |
+|---|---:|
+| gold_aircraft_rotation | 273,310 |
+| gold_otp_carrier_month | 30 |
+| gold_delay_causes | 15 |
+| gold_airport_hour | 3,779 |
+| gold_weather_impact | 19,395 |
+| gold_disruptions | 37,659 |
+| gold_tail_delays | 11,197 |
+
+All Gold objects are built from Silver-layer objects or reference mappings,
+not from other Gold objects.
+
+- `gold_otp_carrier_month`: materialized because carrier-month KPIs are reused repeatedly in BI.
+- `gold_delay_causes`: materialized because cause aggregations are expensive and repeatedly queried.
+- `gold_airport_hour`: materialized for repeated airport/hour operational analysis.
+- `gold_weather_impact`: materialized because it persists a flight-weather join and daily aggregation.
+- `gold_aircraft_rotation`: materialized because it provides a governed reusable aircraft-level operational dataset.
+- `gold_disruptions`: materialized because it provides a reusable filtered exception dataset.
+- `gold_tail_delays`: materialized because it precomputes aircraft reliability metrics.

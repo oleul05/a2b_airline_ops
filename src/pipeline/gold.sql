@@ -112,7 +112,7 @@ SELECT
   w.tmin
 
 FROM flight_daily f
-LEFT JOIN station_map m
+INNER JOIN station_map m
   ON f.origin = m.airport_code
 LEFT JOIN silver_weather_daily w
   ON m.station_id = w.station_id
