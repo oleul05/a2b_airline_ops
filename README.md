@@ -23,3 +23,11 @@
 | BTS lookup tables | COPY INTO | Small reference files; simple and safely re-runnable |
 | OurAirports reference | COPY INTO | Small batch reference dataset |
 | NOAA weather | REST API to Volume | Source is exposed through a REST API and raw JSON should be retained |
+
+## Task 1.4 - NOAA REST Ingestion
+
+- NOAA API token stored in Databricks secret scope `a2`
+- `ref_airport_station` created with 10 airport-to-GHCND mappings
+- Weather data fetched for 2018-2025
+- 80 raw JSON files landed in `/Volumes/workspace/dev_landing/raw/weather/`
+- Secret redaction verified in notebook output
