@@ -14,3 +14,12 @@
 | Invite teammate/user | AVAILABLE | Successfully added and removed a test user |
 | Service principal | AVAILABLE | Add service principal dialog is available |
 | BTS local cache download | IN PROGRESS | `python3 tools/drop_files.py --download-only` |
+
+## Ingestion Decisions
+
+| Source | Method | Why |
+|---|---|---|
+| BTS monthly flight files | Auto Loader | Monthly incremental files arrive continuously and need schema evolution support |
+| BTS lookup tables | COPY INTO | Small reference files; simple and safely re-runnable |
+| OurAirports reference | COPY INTO | Small batch reference dataset |
+| NOAA weather | REST API to Volume | Source is exposed through a REST API and raw JSON should be retained |
