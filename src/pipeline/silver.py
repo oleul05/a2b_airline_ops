@@ -80,7 +80,6 @@ def v_flights_conformed():
 
 @dp.table(name="silver_flights_clean", cluster_by=["flight_date"], comment="Flights that pass every drop rule")
 @dp.expect_or_fail("has_source_file", "_source_file IS NOT NULL")
-@dp.expect_or_fail("dev_fail_test","distance_mi < 0")
 @dp.expect_all(WARN_RULES)
 @dp.expect_all_or_drop(DROP_RULES)
 def silver_flights_clean():
