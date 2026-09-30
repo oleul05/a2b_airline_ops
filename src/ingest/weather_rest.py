@@ -1,5 +1,4 @@
 # Databricks notebook source
-# src/ingest/weather_rest.py
 
 import datetime as dt
 import json
@@ -12,16 +11,32 @@ dbutils.widgets.text("start_date", "2018-01-01")
 dbutils.widgets.text("end_date", "2025-12-31")
 dbutils.widgets.text("stations", "")
 
-CAT = dbutils.widgets.get("catalog")
-ENV = dbutils.widgets.get("env")
-
+CAT, ENV = dbutils.widgets.get("catalog"), dbutils.widgets.get("env")
 OUT = f"/Volumes/{CAT}/{ENV}_landing/raw/weather"
 BASE = "https://www.ncei.noaa.gov/cdo-web/api/v2/data"
 
-TOKEN = dbutils.secrets.get(
-    scope="a2",
-    key="noaa_token"
-)
+TOKEN = dbutils.secrets.get(scope="a2", key="noaa_token")
+
+
+# ---- helper for Task 1.4 station selection ----
+def stations_near(lat: float, lon: float, box: float = 0.15) -> list:
+    r = requests.get(
+        "https://www.ncei.noaa.gov/cdo-web/api/v2/stations",
+        headers={"token": TOKEN},
+        params={
+            "datasetid": "GHCND",
+            "extent": f"{lat - box},{lon - box},{lat + box},{lon + box}",
+            "startdate": "2018-01-01",
+            "enddate": "2025-12-31",
+            "limit": 100,
+        },
+        timeout=60,
+    )
+    r.raise_for_status()
+    return [
+        (s["id"], s["name"], s.get("datacoverage"))
+        for s in r.json().get("results", [])
+    ]
 
 
 def year_windows(start: str, end: str):
