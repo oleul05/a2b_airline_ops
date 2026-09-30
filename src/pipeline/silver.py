@@ -114,18 +114,107 @@ def dim_airport():
             .dropDuplicates(["airport_code"]))
 
 
-@dp.materialized_view(name="silver_weather_daily", comment="One row per station and day; the latest fetch wins")
+@dp.materialized_view(
+    name="silver_weather_daily",
+    comment="One row per station and day; the latest fetch wins"
+)
 def silver_weather_daily():
-    obs = (spark.read.table("bronze_weather")
-           .select("fetched_at", F.explode("results").alias("r"))
-           .select("fetched_at",
-                   F.to_date(F.substring("r.date", 1, 10)).alias("obs_date"),
-                   F.regexp_replace("r.station", "^GHCND:", "").alias("station_id"),
-                   F.col("r.datatype").alias("datatype"),
-                   F.col("r.value").cast("double").alias("value")))
-    # Each scheduled fetch lands a new file: keep the most recently fetched value per station, day and element.
-    latest = obs.groupBy("obs_date", "station_id", "datatype").agg(F.max_by("value", "fetched_at").alias("value"))
-    # Pipelines do not support .pivot(); conditional aggregation does the same job.
-    return (latest.groupBy("obs_date", "station_id")
-                  .agg(*[F.max(F.when(F.col("datatype") == t, F.col("value"))).alias(t.lower())
-                         for t in ["PRCP", "SNOW", "TMAX", "TMIN"]]))
+
+    weather_schema = """
+        array<
+            struct<
+                date:string,
+                datatype:string,
+                station:string,
+                value:double
+            >
+        >
+    """
+
+    obs = (
+        spark.read
+             .table("bronze_weather")
+
+             # In this environment Auto Loader inferred results as STRING,
+             # so parse the JSON array before explode().
+             .withColumn(
+                 "results_parsed",
+                 F.from_json(
+                     F.col("results"),
+                     weather_schema
+                 )
+             )
+
+             .select(
+                 "fetched_at",
+                 F.explode("results_parsed").alias("r")
+             )
+
+             .select(
+                 "fetched_at",
+
+                 F.to_date(
+                     F.substring(
+                         F.col("r.date"),
+                         1,
+                         10
+                     )
+                 ).alias("obs_date"),
+
+                 F.regexp_replace(
+                     F.col("r.station"),
+                     "^GHCND:",
+                     ""
+                 ).alias("station_id"),
+
+                 F.col("r.datatype").alias("datatype"),
+
+                 F.col("r.value")
+                  .cast("double")
+                  .alias("value")
+             )
+    )
+
+    # If NOAA data is fetched again, keep the newest value
+    # for each station/day/datatype.
+    latest = (
+        obs
+        .groupBy(
+            "obs_date",
+            "station_id",
+            "datatype"
+        )
+        .agg(
+            F.max_by(
+                "value",
+                "fetched_at"
+            ).alias("value")
+        )
+    )
+
+    # Pipeline does not use pivot here; conditional aggregation
+    # produces PRCP/SNOW/TMAX/TMIN columns.
+    return (
+        latest
+        .groupBy(
+            "obs_date",
+            "station_id"
+        )
+        .agg(
+            *[
+                F.max(
+                    F.when(
+                        F.col("datatype") == t,
+                        F.col("value")
+                    )
+                ).alias(t.lower())
+
+                for t in [
+                    "PRCP",
+                    "SNOW",
+                    "TMAX",
+                    "TMIN"
+                ]
+            ]
+        )
+    )
