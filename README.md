@@ -67,3 +67,17 @@ The empty trailing field is excluded during Silver conformance.
 - Clean + quarantine = Bronze: PASS
 - De-duplicated Silver rows: 1,066,492
 - Duplicates removed: 1,000
+### expect_or_fail proof
+
+A temporary development expectation `distance_mi < 0` was added to
+`silver_flights_clean`.
+
+A normal incremental pipeline update did not fail because the streaming table
+had no new flight records to process, so the new expectation was not evaluated
+against historical rows.
+
+A full refresh reset the streaming state and reprocessed the source data.
+The temporary expectation then failed on real records, proving that
+`expect_or_fail` stops the update when violating rows are processed.
+
+The temporary rule was removed and the pipeline was successfully refreshed again.
