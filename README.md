@@ -45,3 +45,25 @@ Auto Loader populated `_rescued_data` with an unnamed trailing CSV field
 `_c109`. The value is empty for all rows, while `_file_path` records the
 originating file. Bronze preserves this raw structure as delivered.
 The empty trailing field is excluded during Silver conformance.
+
+## Silver Data Quality Rules
+
+| Rule | Behaviour | Threshold / Expression | Reason | Rows affected |
+|---|---|---|---|---:|
+| has_source_file | fail | `_source_file IS NOT NULL` | Every row must retain lineage | 0 |
+| period_matches_file | drop | `period = file_period` | Monthly file must contain its own period | 0 |
+| flags_present | drop | cancelled/diverted not NULL | Required for operational rates | 0 |
+| origin_ne_dest | drop | `origin <> dest` | Origin and destination should differ | 0 |
+| distance_positive | drop | `distance_mi > 0` | Non-positive distance is invalid | 0 |
+| crs_time_valid | drop | scheduled time 0000–2400 | Schedule must be parseable | 0 |
+| cancel_code_when_cancelled | warn | cancelled flight has cancellation code | Needed for cancellation analysis | <your result> |
+| arr_delay_when_completed | warn | completed flight has arrival delay | Completed flights should have arrival timing | <your result> |
+
+### Silver Reconciliation
+
+- Bronze rows: 1,067,492
+- Silver clean rows: 1,067,492
+- Quarantined rows: 0
+- Clean + quarantine = Bronze: PASS
+- De-duplicated Silver rows: 1,066,492
+- Duplicates removed: 1,000
