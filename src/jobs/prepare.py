@@ -86,17 +86,40 @@ for f in sorted(dbutils.fs.ls(ZIP_DIR), key=lambda x: x.name):
                 expected = sum(1 for _ in fh) - 1
 
             # Register file in manifest
+            # Register file in manifest idempotently
             spark.sql(
                 """
-                INSERT INTO IDENTIFIER(:t)
-                VALUES (
-                    'ontime',
-                    :z,
-                    :c,
-                    :p,
-                    :n,
-                    current_timestamp()
-                )
+                MERGE INTO IDENTIFIER(:t) AS target
+
+                USING (
+                    SELECT
+                        'ontime' AS dataset,
+                        :z AS landed_file,
+                        :c AS unpacked_file,
+                        :p AS period,
+                        :n AS expected_rows
+                ) AS source
+
+                ON target.landed_file = source.landed_file
+                   AND target.unpacked_file = source.unpacked_file
+
+                WHEN NOT MATCHED THEN
+                  INSERT (
+                      dataset,
+                      landed_file,
+                      unpacked_file,
+                      period,
+                      expected_rows,
+                      registered_at
+                  )
+                  VALUES (
+                      source.dataset,
+                      source.landed_file,
+                      source.unpacked_file,
+                      source.period,
+                      source.expected_rows,
+                      current_timestamp()
+                  )
                 """,
                 args={
                     "t": MANIFEST,
