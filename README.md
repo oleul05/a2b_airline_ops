@@ -128,4 +128,4 @@ not from other Gold objects.
 
 In the dev target, `mode: development` pauses schedules and triggers automatically. Therefore, the three trigger types are configured in dev but are proven end-to-end only in the prod target.
 
-Conflict demo: edited from Databricks Git folder
+Conflict demo: edited from Databricks Git folder and add conflict
