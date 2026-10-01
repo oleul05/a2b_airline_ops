@@ -127,3 +127,5 @@ not from other Gold objects.
 | weather_job | Daily cron at 05:30 Asia/Dhaka | NOAA data must be polled because there is no file-arrival or table-update event available to subscribe to. | File-arrival and table-update triggers do not apply because the source is an external REST API. |
 
 In the dev target, `mode: development` pauses schedules and triggers automatically. Therefore, the three trigger types are configured in dev but are proven end-to-end only in the prod target.
+
+Conflict demo: edited from Databricks Git folder
