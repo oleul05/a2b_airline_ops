@@ -1,5 +1,8 @@
 # Databricks notebook source
-
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 import datetime as dt
 import json
 import time

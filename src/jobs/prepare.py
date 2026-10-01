@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # src/jobs/prepare.py
 # Unzip newly landed BTS files directly inside Unity Catalog Volumes
 # and register their expected row counts.
