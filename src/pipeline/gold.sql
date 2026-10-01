@@ -2,7 +2,7 @@
 
 CREATE OR REFRESH MATERIALIZED VIEW ${a2.gold}.gold_otp_carrier_month
 CLUSTER BY (period)
-COMMENT 'Monthly on-time and cancellation rates per reporting carrier'
+COMMENT 'Monthly carrier KPI view with operated flights, on-time rate and cancellation rate'
 AS SELECT
   f.period,
   f.carrier_code,
