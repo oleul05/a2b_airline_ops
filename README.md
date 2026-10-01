@@ -125,3 +125,5 @@ not from other Gold objects.
 | build_job | File arrival on raw/ontime_zip/ | BTS files arrive when the upstream source is ready, so processing should start when a new file lands. | A cron schedule could run before a file arrives, causing empty runs, or after it arrives, causing stale results. |
 | release_job | Table update on ops.release | Downstream release work should start only after a build passes the quality gate and a certified release is written. | A time-based schedule could run before certification or unnecessarily when nothing changed. |
 | weather_job | Daily cron at 05:30 Asia/Dhaka | NOAA data must be polled because there is no file-arrival or table-update event available to subscribe to. | File-arrival and table-update triggers do not apply because the source is an external REST API. |
+
+In the dev target, `mode: development` pauses schedules and triggers automatically. Therefore, the three trigger types are configured in dev but are proven end-to-end only in the prod target.
