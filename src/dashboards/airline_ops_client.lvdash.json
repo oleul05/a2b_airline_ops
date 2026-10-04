@@ -1,0 +1,3309 @@
+{
+  "datasets": [
+    {
+      "name": "ds_kpi",
+      "displayName": "Overview · network KPIs",
+      "queryLines": [
+        "-- Network-wide KPIs, weighted by flight counts (not an average of monthly rates)\n",
+        "WITH otp AS (\n",
+        "  SELECT\n",
+        "    SUM(scheduled_flights)                     AS scheduled_flights,\n",
+        "    SUM(operated_flights)                      AS operated_flights,\n",
+        "    SUM(on_time_flights)                       AS on_time_flights,\n",
+        "    SUM(cancellation_rate * scheduled_flights) AS cancelled_flights\n",
+        "  FROM workspace.prd_gold.gold_otp_carrier_month\n",
+        "),\n",
+        "dc AS (\n",
+        "  SELECT\n",
+        "    SUM(COALESCE(carrier_delay_min, 0) + COALESCE(weather_delay_min, 0) + COALESCE(nas_delay_min, 0)\n",
+        "      + COALESCE(security_delay_min, 0) + COALESCE(late_aircraft_delay_min, 0)) AS delay_minutes,\n",
+        "    SUM(operated_flights)                                                        AS operated_flights\n",
+        "  FROM workspace.prd_gold.gold_delay_causes\n",
+        ")\n",
+        "SELECT\n",
+        "  otp.scheduled_flights,\n",
+        "  otp.operated_flights,\n",
+        "  otp.on_time_flights   / NULLIF(otp.operated_flights, 0)  AS on_time_rate,\n",
+        "  otp.cancelled_flights / NULLIF(otp.scheduled_flights, 0) AS cancellation_rate,\n",
+        "  dc.delay_minutes      / NULLIF(dc.operated_flights, 0)   AS delay_min_per_flight\n",
+        "FROM otp CROSS JOIN dc"
+      ]
+    },
+    {
+      "name": "ds_monthly",
+      "displayName": "Overview · monthly network trend",
+      "queryLines": [
+        "SELECT\n",
+        "  to_date(concat(period, '-01'))                                                        AS month,\n",
+        "  SUM(scheduled_flights)                                                                AS scheduled_flights,\n",
+        "  ROUND(100.0 * SUM(on_time_flights) / NULLIF(SUM(operated_flights), 0), 2)             AS on_time_pct,\n",
+        "  ROUND(100.0 * SUM(cancellation_rate * scheduled_flights) / NULLIF(SUM(scheduled_flights), 0), 2) AS cancellation_pct\n",
+        "FROM workspace.prd_gold.gold_otp_carrier_month\n",
+        "GROUP BY period\n",
+        "ORDER BY month"
+      ]
+    },
+    {
+      "name": "ds_release",
+      "displayName": "Trust · latest certified release",
+      "queryLines": [
+        "SELECT\n",
+        "  date_format(last_certified_at, 'yyyy-MM-dd HH:mm') AS last_certified_at,\n",
+        "  certified_releases,\n",
+        "  last_periods\n",
+        "FROM workspace.prd_ops.release_status"
+      ]
+    },
+    {
+      "name": "ds_carrier_trend",
+      "displayName": "Reliability · top-5 carriers by year",
+      "queryLines": [
+        "WITH yearly AS (\n",
+        "  SELECT\n",
+        "    CAST(substr(period, 1, 4) AS INT)                                         AS year,\n",
+        "    carrier_code,\n",
+        "    COALESCE(MAX(carrier_name), carrier_code)                                 AS airline,\n",
+        "    SUM(scheduled_flights)                                                    AS scheduled_flights,\n",
+        "    ROUND(100.0 * SUM(on_time_flights) / NULLIF(SUM(operated_flights), 0), 2) AS on_time_pct,\n",
+        "    ROUND(100.0 * SUM(cancellation_rate * scheduled_flights) / NULLIF(SUM(scheduled_flights), 0), 2) AS cancellation_pct\n",
+        "  FROM workspace.prd_gold.gold_otp_carrier_month\n",
+        "  GROUP BY 1, 2\n",
+        "),\n",
+        "largest AS (\n",
+        "  SELECT carrier_code\n",
+        "  FROM yearly\n",
+        "  GROUP BY carrier_code\n",
+        "  ORDER BY SUM(scheduled_flights) DESC\n",
+        "  LIMIT 5\n",
+        ")\n",
+        "SELECT CAST(y.year AS STRING) AS year, y.carrier_code, y.airline, y.scheduled_flights, y.on_time_pct, y.cancellation_pct\n",
+        "FROM yearly y\n",
+        "JOIN largest l ON y.carrier_code = l.carrier_code\n",
+        "ORDER BY y.year, y.airline"
+      ]
+    },
+    {
+      "name": "ds_carrier_rank",
+      "displayName": "Reliability · latest-year ranking",
+      "queryLines": [
+        "WITH yearly AS (\n",
+        "  SELECT\n",
+        "    CAST(substr(period, 1, 4) AS INT)                                         AS year,\n",
+        "    carrier_code,\n",
+        "    COALESCE(MAX(carrier_name), carrier_code)                                 AS airline,\n",
+        "    SUM(scheduled_flights)                                                    AS scheduled_flights,\n",
+        "    100.0 * SUM(on_time_flights) / NULLIF(SUM(operated_flights), 0)           AS on_time_pct,\n",
+        "    100.0 * SUM(cancellation_rate * scheduled_flights) / NULLIF(SUM(scheduled_flights), 0) AS cancellation_pct\n",
+        "  FROM workspace.prd_gold.gold_otp_carrier_month\n",
+        "  GROUP BY 1, 2\n",
+        "),\n",
+        "with_change AS (\n",
+        "  SELECT *,\n",
+        "    on_time_pct - LAG(on_time_pct) OVER (PARTITION BY carrier_code ORDER BY year) AS on_time_change_pp\n",
+        "  FROM yearly\n",
+        ")\n",
+        "SELECT\n",
+        "  CAST(year AS STRING) AS year,\n",
+        "  DENSE_RANK() OVER (ORDER BY on_time_pct DESC) AS rank,\n",
+        "  airline,\n",
+        "  carrier_code,\n",
+        "  scheduled_flights,\n",
+        "  ROUND(on_time_pct, 2)       AS on_time_pct,\n",
+        "  ROUND(on_time_change_pp, 2) AS on_time_change_pp,\n",
+        "  ROUND(cancellation_pct, 2)  AS cancellation_pct\n",
+        "FROM with_change\n",
+        "WHERE year = (SELECT MAX(year) FROM yearly)\n",
+        "ORDER BY rank"
+      ]
+    },
+    {
+      "name": "ds_cause_share",
+      "displayName": "Root cause · share of delay minutes",
+      "queryLines": [
+        "WITH t AS (\n",
+        "  SELECT\n",
+        "    SUM(COALESCE(carrier_delay_min, 0))       AS carrier,\n",
+        "    SUM(COALESCE(weather_delay_min, 0))       AS weather,\n",
+        "    SUM(COALESCE(nas_delay_min, 0))           AS nas,\n",
+        "    SUM(COALESCE(security_delay_min, 0))      AS security,\n",
+        "    SUM(COALESCE(late_aircraft_delay_min, 0)) AS late_aircraft\n",
+        "  FROM workspace.prd_gold.gold_delay_causes\n",
+        ")\n",
+        "SELECT cause, ROUND(minutes / 1e6, 2) AS delay_million_min,\n",
+        "       ROUND(100.0 * minutes / SUM(minutes) OVER (), 1) AS share_pct\n",
+        "FROM t\n",
+        "LATERAL VIEW stack(5,\n",
+        "    'Carrier (airline-controlled)', carrier,\n",
+        "    'Late-arriving aircraft',       late_aircraft,\n",
+        "    'NAS (air traffic / airport)',  nas,\n",
+        "    'Weather (extreme)',            weather,\n",
+        "    'Security',                     security\n",
+        ") s AS cause, minutes"
+      ]
+    },
+    {
+      "name": "ds_cause_year",
+      "displayName": "Root cause · minutes per flight by year",
+      "queryLines": [
+        "WITH y AS (\n",
+        "  SELECT\n",
+        "    year,\n",
+        "    SUM(operated_flights) AS operated_flights,\n",
+        "    SUM(COALESCE(carrier_delay_min, 0))       AS carrier,\n",
+        "    SUM(COALESCE(weather_delay_min, 0))       AS weather,\n",
+        "    SUM(COALESCE(nas_delay_min, 0))           AS nas,\n",
+        "    SUM(COALESCE(security_delay_min, 0))      AS security,\n",
+        "    SUM(COALESCE(late_aircraft_delay_min, 0)) AS late_aircraft\n",
+        "  FROM workspace.prd_gold.gold_delay_causes\n",
+        "  GROUP BY year\n",
+        ")\n",
+        "SELECT CAST(year AS STRING) AS year, cause,\n",
+        "       ROUND(minutes / NULLIF(operated_flights, 0), 2) AS delay_min_per_flight\n",
+        "FROM y\n",
+        "LATERAL VIEW stack(5,\n",
+        "    'Carrier (airline-controlled)', carrier,\n",
+        "    'Late-arriving aircraft',       late_aircraft,\n",
+        "    'NAS (air traffic / airport)',  nas,\n",
+        "    'Weather (extreme)',            weather,\n",
+        "    'Security',                     security\n",
+        ") s AS cause, minutes\n",
+        "ORDER BY year"
+      ]
+    },
+    {
+      "name": "ds_cause_carrier",
+      "displayName": "Root cause · by carrier (latest year)",
+      "queryLines": [
+        "WITH latest AS (SELECT MAX(year) AS year FROM workspace.prd_gold.gold_delay_causes),\n",
+        "c AS (\n",
+        "  SELECT\n",
+        "    d.year,\n",
+        "    d.carrier_code,\n",
+        "    COALESCE(MAX(d.carrier_name), d.carrier_code) AS airline,\n",
+        "    SUM(d.operated_flights) AS operated_flights,\n",
+        "    SUM(COALESCE(carrier_delay_min, 0))       AS carrier,\n",
+        "    SUM(COALESCE(weather_delay_min, 0))       AS weather,\n",
+        "    SUM(COALESCE(nas_delay_min, 0))           AS nas,\n",
+        "    SUM(COALESCE(security_delay_min, 0))      AS security,\n",
+        "    SUM(COALESCE(late_aircraft_delay_min, 0)) AS late_aircraft\n",
+        "  FROM workspace.prd_gold.gold_delay_causes d\n",
+        "  JOIN latest l ON d.year = l.year\n",
+        "  GROUP BY d.year, d.carrier_code\n",
+        "  ORDER BY operated_flights DESC\n",
+        "  LIMIT 10\n",
+        ")\n",
+        "SELECT year, airline, cause,\n",
+        "       ROUND(minutes / NULLIF(operated_flights, 0), 2) AS delay_min_per_flight\n",
+        "FROM c\n",
+        "LATERAL VIEW stack(5,\n",
+        "    'Carrier (airline-controlled)', carrier,\n",
+        "    'Late-arriving aircraft',       late_aircraft,\n",
+        "    'NAS (air traffic / airport)',  nas,\n",
+        "    'Weather (extreme)',            weather,\n",
+        "    'Security',                     security\n",
+        ") s AS cause, minutes"
+      ]
+    },
+    {
+      "name": "ds_airport_top",
+      "displayName": "Bottlenecks · busiest airports (latest year)",
+      "queryLines": [
+        "WITH latest AS (SELECT MAX(year) AS year FROM workspace.prd_gold.gold_airport_hour)\n",
+        "SELECT\n",
+        "  h.year,\n",
+        "  h.origin                                                       AS airport,\n",
+        "  COALESCE(MAX(h.airport_name), h.origin)                        AS airport_name,\n",
+        "  SUM(h.scheduled_departures)                                    AS departures,\n",
+        "  ROUND(SUM(h.avg_dep_delay_min * h.scheduled_departures)\n",
+        "        / NULLIF(SUM(CASE WHEN h.avg_dep_delay_min IS NOT NULL THEN h.scheduled_departures END), 0), 1) AS avg_dep_delay_min,\n",
+        "  ROUND(100.0 * SUM(h.cancellation_rate * h.scheduled_departures) / NULLIF(SUM(h.scheduled_departures), 0), 2) AS cancellation_pct\n",
+        "FROM workspace.prd_gold.gold_airport_hour h\n",
+        "JOIN latest l ON h.year = l.year\n",
+        "GROUP BY h.year, h.origin\n",
+        "ORDER BY departures DESC\n",
+        "LIMIT 15"
+      ]
+    },
+    {
+      "name": "ds_hour_profile",
+      "displayName": "Bottlenecks · network delay by departure hour",
+      "queryLines": [
+        "WITH latest AS (SELECT MAX(year) AS year FROM workspace.prd_gold.gold_airport_hour)\n",
+        "SELECT\n",
+        "  concat(lpad(CAST(h.dep_hour AS STRING), 2, '0'), ':00')        AS dep_hour,\n",
+        "  SUM(h.scheduled_departures)                                    AS departures,\n",
+        "  ROUND(SUM(h.avg_dep_delay_min * h.scheduled_departures)\n",
+        "        / NULLIF(SUM(CASE WHEN h.avg_dep_delay_min IS NOT NULL THEN h.scheduled_departures END), 0), 1) AS avg_dep_delay_min,\n",
+        "  ROUND(100.0 * SUM(h.cancellation_rate * h.scheduled_departures) / NULLIF(SUM(h.scheduled_departures), 0), 2) AS cancellation_pct\n",
+        "FROM workspace.prd_gold.gold_airport_hour h\n",
+        "JOIN latest l ON h.year = l.year\n",
+        "WHERE h.dep_hour IS NOT NULL\n",
+        "GROUP BY h.dep_hour\n",
+        "HAVING SUM(h.scheduled_departures) >= 1000\n",
+        "ORDER BY dep_hour"
+      ]
+    },
+    {
+      "name": "ds_airport_hour_heat",
+      "displayName": "Bottlenecks · airport x hour heatmap",
+      "queryLines": [
+        "WITH latest AS (SELECT MAX(year) AS year FROM workspace.prd_gold.gold_airport_hour),\n",
+        "top AS (\n",
+        "  SELECT h.origin\n",
+        "  FROM workspace.prd_gold.gold_airport_hour h JOIN latest l ON h.year = l.year\n",
+        "  GROUP BY h.origin\n",
+        "  ORDER BY SUM(h.scheduled_departures) DESC\n",
+        "  LIMIT 10\n",
+        ")\n",
+        "SELECT\n",
+        "  h.origin                                                       AS airport,\n",
+        "  concat(lpad(CAST(h.dep_hour AS STRING), 2, '0'), ':00')        AS dep_hour,\n",
+        "  SUM(h.scheduled_departures)                                    AS departures,\n",
+        "  ROUND(SUM(h.avg_dep_delay_min * h.scheduled_departures)\n",
+        "        / NULLIF(SUM(CASE WHEN h.avg_dep_delay_min IS NOT NULL THEN h.scheduled_departures END), 0), 1) AS avg_dep_delay_min\n",
+        "FROM workspace.prd_gold.gold_airport_hour h\n",
+        "JOIN latest l ON h.year = l.year\n",
+        "JOIN top t    ON h.origin = t.origin\n",
+        "WHERE h.dep_hour BETWEEN 5 AND 23\n",
+        "GROUP BY h.origin, h.dep_hour"
+      ]
+    },
+    {
+      "name": "ds_peak_gap",
+      "displayName": "Bottlenecks · worst vs best hour per airport",
+      "queryLines": [
+        "WITH latest AS (SELECT MAX(year) AS year FROM workspace.prd_gold.gold_airport_hour),\n",
+        "base AS (\n",
+        "  SELECT\n",
+        "    h.origin,\n",
+        "    COALESCE(MAX(h.airport_name), h.origin) AS airport_name,\n",
+        "    h.dep_hour,\n",
+        "    SUM(h.scheduled_departures)             AS departures,\n",
+        "    SUM(h.avg_dep_delay_min * h.scheduled_departures)\n",
+        "      / NULLIF(SUM(CASE WHEN h.avg_dep_delay_min IS NOT NULL THEN h.scheduled_departures END), 0) AS delay\n",
+        "  FROM workspace.prd_gold.gold_airport_hour h JOIN latest l ON h.year = l.year\n",
+        "  GROUP BY h.origin, h.dep_hour\n",
+        "),\n",
+        "top AS (\n",
+        "  SELECT origin FROM base GROUP BY origin ORDER BY SUM(departures) DESC LIMIT 15\n",
+        "),\n",
+        "ranked AS (\n",
+        "  SELECT b.*,\n",
+        "    ROW_NUMBER() OVER (PARTITION BY b.origin ORDER BY b.delay DESC) AS rn_worst,\n",
+        "    ROW_NUMBER() OVER (PARTITION BY b.origin ORDER BY b.delay ASC)  AS rn_best\n",
+        "  FROM base b JOIN top t ON b.origin = t.origin\n",
+        "  WHERE b.departures >= 300 AND b.delay IS NOT NULL      -- ignore thin overnight hours\n",
+        ")\n",
+        "SELECT\n",
+        "  w.origin                                                AS airport,\n",
+        "  w.airport_name,\n",
+        "  concat(lpad(CAST(w.dep_hour AS STRING), 2, '0'), ':00') AS worst_hour,\n",
+        "  ROUND(w.delay, 1)                                       AS worst_hour_avg_delay_min,\n",
+        "  concat(lpad(CAST(b.dep_hour AS STRING), 2, '0'), ':00') AS best_hour,\n",
+        "  ROUND(b.delay, 1)                                       AS best_hour_avg_delay_min,\n",
+        "  ROUND(w.delay - b.delay, 1)                             AS peak_gap_min\n",
+        "FROM ranked w\n",
+        "JOIN ranked b ON w.origin = b.origin AND b.rn_best = 1\n",
+        "WHERE w.rn_worst = 1\n",
+        "ORDER BY peak_gap_min DESC"
+      ]
+    },
+    {
+      "name": "ds_weather_condition",
+      "displayName": "Weather · performance by condition",
+      "queryLines": [
+        "WITH classified AS (\n",
+        "  SELECT\n",
+        "    origin,\n",
+        "    flights,\n",
+        "    cancelled_flights,\n",
+        "    avg_dep_delay_min,\n",
+        "    CASE\n",
+        "      WHEN prcp IS NULL AND snow IS NULL THEN NULL\n",
+        "      WHEN COALESCE(snow, 0) > 0         THEN '4 · Snow'\n",
+        "      WHEN COALESCE(prcp, 0) >= 10       THEN '3 · Heavy rain (≥10 mm)'\n",
+        "      WHEN COALESCE(prcp, 0) > 0         THEN '2 · Light rain (<10 mm)'\n",
+        "      ELSE                                    '1 · Dry'\n",
+        "    END AS weather_condition\n",
+        "  FROM workspace.prd_gold.gold_weather_impact\n",
+        ")\n",
+        "SELECT\n",
+        "  weather_condition,\n",
+        "  COUNT(*)                                                              AS airport_days,\n",
+        "  SUM(flights)                                                          AS flights,\n",
+        "  ROUND(100.0 * SUM(cancelled_flights) / NULLIF(SUM(flights), 0), 2)    AS cancellation_pct,\n",
+        "  ROUND(SUM(avg_dep_delay_min * flights)\n",
+        "        / NULLIF(SUM(CASE WHEN avg_dep_delay_min IS NOT NULL THEN flights END), 0), 1) AS avg_dep_delay_min\n",
+        "FROM classified\n",
+        "WHERE weather_condition IS NOT NULL\n",
+        "GROUP BY weather_condition\n",
+        "ORDER BY weather_condition"
+      ]
+    },
+    {
+      "name": "ds_weather_headline",
+      "displayName": "Weather · headline multipliers",
+      "queryLines": [
+        "WITH classified AS (\n",
+        "  SELECT\n",
+        "    origin,\n",
+        "    flights,\n",
+        "    cancelled_flights,\n",
+        "    avg_dep_delay_min,\n",
+        "    CASE\n",
+        "      WHEN prcp IS NULL AND snow IS NULL THEN NULL\n",
+        "      WHEN COALESCE(snow, 0) > 0         THEN '4 · Snow'\n",
+        "      WHEN COALESCE(prcp, 0) >= 10       THEN '3 · Heavy rain (≥10 mm)'\n",
+        "      WHEN COALESCE(prcp, 0) > 0         THEN '2 · Light rain (<10 mm)'\n",
+        "      ELSE                                    '1 · Dry'\n",
+        "    END AS weather_condition\n",
+        "  FROM workspace.prd_gold.gold_weather_impact\n",
+        "),\n",
+        "agg AS (\n",
+        "  SELECT\n",
+        "    weather_condition,\n",
+        "    SUM(cancelled_flights) / NULLIF(SUM(flights), 0) AS cancel_rate,\n",
+        "    SUM(avg_dep_delay_min * flights)\n",
+        "      / NULLIF(SUM(CASE WHEN avg_dep_delay_min IS NOT NULL THEN flights END), 0) AS avg_delay\n",
+        "  FROM classified\n",
+        "  WHERE weather_condition IS NOT NULL\n",
+        "  GROUP BY weather_condition\n",
+        ")\n",
+        "SELECT\n",
+        "  MAX(CASE WHEN weather_condition LIKE '4%' THEN cancel_rate END)\n",
+        "    / NULLIF(MAX(CASE WHEN weather_condition LIKE '1%' THEN cancel_rate END), 0) AS snow_cancel_multiplier,\n",
+        "  MAX(CASE WHEN weather_condition LIKE '3%' THEN cancel_rate END)\n",
+        "    / NULLIF(MAX(CASE WHEN weather_condition LIKE '1%' THEN cancel_rate END), 0) AS heavy_rain_cancel_multiplier,\n",
+        "  MAX(CASE WHEN weather_condition LIKE '4%' THEN avg_delay END)\n",
+        "    - MAX(CASE WHEN weather_condition LIKE '1%' THEN avg_delay END)              AS snow_extra_delay_min\n",
+        "FROM agg"
+      ]
+    },
+    {
+      "name": "ds_weather_airport",
+      "displayName": "Weather · airport x condition",
+      "queryLines": [
+        "WITH classified AS (\n",
+        "  SELECT\n",
+        "    origin,\n",
+        "    flights,\n",
+        "    cancelled_flights,\n",
+        "    avg_dep_delay_min,\n",
+        "    CASE\n",
+        "      WHEN prcp IS NULL AND snow IS NULL THEN NULL\n",
+        "      WHEN COALESCE(snow, 0) > 0         THEN '4 · Snow'\n",
+        "      WHEN COALESCE(prcp, 0) >= 10       THEN '3 · Heavy rain (≥10 mm)'\n",
+        "      WHEN COALESCE(prcp, 0) > 0         THEN '2 · Light rain (<10 mm)'\n",
+        "      ELSE                                    '1 · Dry'\n",
+        "    END AS weather_condition\n",
+        "  FROM workspace.prd_gold.gold_weather_impact\n",
+        ")\n",
+        "SELECT\n",
+        "  origin                                                             AS airport,\n",
+        "  weather_condition,\n",
+        "  SUM(flights)                                                       AS flights,\n",
+        "  ROUND(100.0 * SUM(cancelled_flights) / NULLIF(SUM(flights), 0), 2) AS cancellation_pct\n",
+        "FROM classified\n",
+        "WHERE weather_condition IS NOT NULL\n",
+        "GROUP BY origin, weather_condition"
+      ]
+    },
+    {
+      "name": "ds_trust_kpi",
+      "displayName": "Trust · pipeline KPIs",
+      "queryLines": [
+        "WITH latest_recon AS (\n",
+        "  SELECT *\n",
+        "  FROM workspace.prd_ops.reconciliation\n",
+        "  QUALIFY ROW_NUMBER() OVER (PARTITION BY period, dataset ORDER BY checked_at DESC) = 1\n",
+        ")\n",
+        "SELECT\n",
+        "  (SELECT COUNT(*) FROM workspace.prd_ops.release)                                         AS certified_releases,\n",
+        "  (SELECT COUNT(*) FROM latest_recon WHERE status = 'OK')                      AS periods_reconciled,\n",
+        "  (SELECT COUNT(*) FROM latest_recon WHERE status <> 'OK')                     AS open_mismatches,\n",
+        "  (SELECT SUM(quarantined_rows) / NULLIF(SUM(bronze_rows), 0) FROM latest_recon) AS quarantine_rate,\n",
+        "  (SELECT COUNT(*) FROM workspace.prd_ops.incidents)                                       AS incidents_raised,\n",
+        "  (SELECT SUM(scheduled_flights) FROM workspace.prd_gold.gold_otp_carrier_month)              AS gold_flights"
+      ]
+    },
+    {
+      "name": "ds_recon",
+      "displayName": "Trust · reconciliation log (latest check per period)",
+      "queryLines": [
+        "SELECT\n",
+        "  period,\n",
+        "  to_date(concat(period, '-01')) AS month,\n",
+        "  dataset,\n",
+        "  expected_rows,\n",
+        "  bronze_rows,\n",
+        "  silver_rows,\n",
+        "  quarantined_rows,\n",
+        "  status,\n",
+        "  date_format(checked_at, 'yyyy-MM-dd HH:mm') AS checked_at\n",
+        "FROM workspace.prd_ops.reconciliation\n",
+        "QUALIFY ROW_NUMBER() OVER (PARTITION BY period, dataset ORDER BY checked_at DESC) = 1\n",
+        "ORDER BY period DESC"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "p_overview",
+      "displayName": "1 · Executive Overview",
+      "layout": [
+        {
+          "widget": {
+            "name": "t_overview",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# US Airline Operations — Reliability & Delay Intelligence\n**Who performs well, why flights are delayed, and where to intervene.** ~53M reconciled BTS flight records (2018–2025) joined with NOAA weather. Every number on this dashboard comes from Gold tables that passed reconciliation and the quality gate."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "k_sched",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_kpi",
+                  "fields": [
+                    {
+                      "name": "sum(scheduled_flights)",
+                      "expression": "SUM(`scheduled_flights`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(scheduled_flights)",
+                  "displayName": "Scheduled flights",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Scheduled flights",
+                "showDescription": true,
+                "description": "All reporting-carrier flights, 2018–2025"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_oper",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_kpi",
+                  "fields": [
+                    {
+                      "name": "sum(operated_flights)",
+                      "expression": "SUM(`operated_flights`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(operated_flights)",
+                  "displayName": "Operated flights",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Operated flights",
+                "showDescription": true,
+                "description": "Not cancelled and not diverted"
+              }
+            }
+          },
+          "position": {
+            "x": 1,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_otp",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_kpi",
+                  "fields": [
+                    {
+                      "name": "sum(on_time_rate)",
+                      "expression": "SUM(`on_time_rate`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(on_time_rate)",
+                  "displayName": "On-time arrival rate",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "On-time arrival rate",
+                "showDescription": true,
+                "description": "Operated flights arriving < 15 min late"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_cxl",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_kpi",
+                  "fields": [
+                    {
+                      "name": "sum(cancellation_rate)",
+                      "expression": "SUM(`cancellation_rate`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(cancellation_rate)",
+                  "displayName": "Cancellation rate",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cancellation rate",
+                "showDescription": true,
+                "description": "Cancelled ÷ scheduled"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_delay",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_kpi",
+                  "fields": [
+                    {
+                      "name": "sum(delay_min_per_flight)",
+                      "expression": "SUM(`delay_min_per_flight`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(delay_min_per_flight)",
+                  "displayName": "Delay minutes per flight",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "none",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Delay minutes per flight",
+                "showDescription": true,
+                "description": "Attributed delay minutes ÷ operated flights"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_rel",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_release",
+                  "fields": [
+                    {
+                      "name": "sum(certified_releases)",
+                      "expression": "SUM(`certified_releases`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(certified_releases)",
+                  "displayName": "Certified releases",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "none",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Certified releases",
+                "showDescription": true,
+                "description": "Loads that passed reconciliation + quality gate"
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "c_monthly_otp",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_monthly",
+                  "fields": [
+                    {
+                      "name": "month",
+                      "expression": "`month`"
+                    },
+                    {
+                      "name": "sum(on_time_pct)",
+                      "expression": "SUM(`on_time_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "month",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Month"
+                },
+                "y": {
+                  "fieldName": "sum(on_time_pct)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "On-time %"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Network on-time arrival rate by month",
+                "showDescription": true,
+                "description": "Weighted by operated flights. Watch the 2020 spike and the post-recovery level."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "c_monthly_cxl",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_monthly",
+                  "fields": [
+                    {
+                      "name": "month",
+                      "expression": "`month`"
+                    },
+                    {
+                      "name": "sum(cancellation_pct)",
+                      "expression": "SUM(`cancellation_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "month",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Month"
+                },
+                "y": {
+                  "fieldName": "sum(cancellation_pct)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Cancellation %"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Network cancellation rate by month",
+                "showDescription": true,
+                "description": "Spikes = network disruption events (pandemic, winter storms, IT outages)."
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 5,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_release",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_release",
+                  "fields": [
+                    {
+                      "name": "last_certified_at",
+                      "expression": "`last_certified_at`"
+                    },
+                    {
+                      "name": "certified_releases",
+                      "expression": "`certified_releases`"
+                    },
+                    {
+                      "name": "last_periods",
+                      "expression": "`last_periods`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "last_certified_at",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "Last certified at",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Last certified at"
+                  },
+                  {
+                    "fieldName": "certified_releases",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "Certified releases",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Certified releases",
+                    "numberFormat": "0,0"
+                  },
+                  {
+                    "fieldName": "last_periods",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "Periods in last release",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Periods in last release"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Latest certified data release",
+                "showDescription": true,
+                "description": "From prd_ops.release_status — refreshed automatically after each certified load"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 11,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "t_overview_nav",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Questions this dashboard answers\n1. **Airline Reliability** — which carriers are consistently reliable, which are slipping?\n2. **Delay Root Cause** — which cause should improvement effort target?\n3. **Airport & Time Bottlenecks** — where and when do delays build up?\n4. **Weather Impact** — how much worse do snow and heavy rain days get?\n5. **Data Trust** — can we rely on these numbers?"
+              ]
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 11,
+            "width": 3,
+            "height": 3
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "p_reliability",
+      "displayName": "2 · Airline Reliability",
+      "layout": [
+        {
+          "widget": {
+            "name": "t_rel",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Which airlines are most reliable?\nConsistent reliability vs. a temporary good or bad month — and who is improving or slipping in the latest year."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "c_carrier_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_carrier_trend",
+                  "fields": [
+                    {
+                      "name": "year",
+                      "expression": "`year`"
+                    },
+                    {
+                      "name": "sum(on_time_pct)",
+                      "expression": "SUM(`on_time_pct`)"
+                    },
+                    {
+                      "name": "airline",
+                      "expression": "`airline`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "year",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Year"
+                },
+                "y": {
+                  "fieldName": "sum(on_time_pct)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "On-time %"
+                },
+                "color": {
+                  "fieldName": "airline",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Airline"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "On-time arrival rate — five largest airlines",
+                "showDescription": true,
+                "description": "% of operated flights arriving less than 15 minutes late, by year."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_rank",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_carrier_rank",
+                  "fields": [
+                    {
+                      "name": "rank",
+                      "expression": "`rank`"
+                    },
+                    {
+                      "name": "airline",
+                      "expression": "`airline`"
+                    },
+                    {
+                      "name": "carrier_code",
+                      "expression": "`carrier_code`"
+                    },
+                    {
+                      "name": "scheduled_flights",
+                      "expression": "`scheduled_flights`"
+                    },
+                    {
+                      "name": "on_time_pct",
+                      "expression": "`on_time_pct`"
+                    },
+                    {
+                      "name": "on_time_change_pp",
+                      "expression": "`on_time_change_pp`"
+                    },
+                    {
+                      "name": "cancellation_pct",
+                      "expression": "`cancellation_pct`"
+                    },
+                    {
+                      "name": "year",
+                      "expression": "`year`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "rank",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "Rank",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Rank",
+                    "numberFormat": "0,0"
+                  },
+                  {
+                    "fieldName": "airline",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "Airline",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Airline"
+                  },
+                  {
+                    "fieldName": "carrier_code",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "Code",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Code"
+                  },
+                  {
+                    "fieldName": "scheduled_flights",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100003,
+                    "title": "Scheduled flights",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Scheduled flights",
+                    "numberFormat": "0,0"
+                  },
+                  {
+                    "fieldName": "on_time_pct",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100004,
+                    "title": "On-time %",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "On-time %",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "on_time_change_pp",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100005,
+                    "title": "Δ vs prior year (pp)",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Δ vs prior year (pp)",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "cancellation_pct",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100006,
+                    "title": "Cancellation %",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Cancellation %",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "year",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100007,
+                    "title": "Year",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Year"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Airline reliability ranking — latest year",
+                "showDescription": true,
+                "description": "Ranked by on-time %. Δ = change in percentage points vs the previous year."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 4,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "c_rank_change",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_carrier_rank",
+                  "fields": [
+                    {
+                      "name": "sum(on_time_change_pp)",
+                      "expression": "SUM(`on_time_change_pp`)"
+                    },
+                    {
+                      "name": "airline",
+                      "expression": "`airline`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "sum(on_time_change_pp)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Δ on-time (pp)"
+                },
+                "y": {
+                  "fieldName": "airline",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Airline"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Improving vs slipping — latest year",
+                "showDescription": true,
+                "description": "Change in on-time % vs prior year. Right = improving, left = deteriorating."
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 8,
+            "width": 2,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "p_root_cause",
+      "displayName": "3 · Delay Root Cause",
+      "layout": [
+        {
+          "widget": {
+            "name": "t_cause",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Why are flights delayed?\nDelay minutes attributed by BTS to five causes. Fix the biggest controllable cause first."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "c_cause_share",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_cause_share",
+                  "fields": [
+                    {
+                      "name": "sum(delay_million_min)",
+                      "expression": "SUM(`delay_million_min`)"
+                    },
+                    {
+                      "name": "cause",
+                      "expression": "`cause`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "sum(delay_million_min)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Delay minutes (M)"
+                },
+                "color": {
+                  "fieldName": "cause",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Cause"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Share of delay minutes, 2018–2025"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 2,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "c_cause_year",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_cause_year",
+                  "fields": [
+                    {
+                      "name": "year",
+                      "expression": "`year`"
+                    },
+                    {
+                      "name": "sum(delay_min_per_flight)",
+                      "expression": "SUM(`delay_min_per_flight`)"
+                    },
+                    {
+                      "name": "cause",
+                      "expression": "`cause`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "year",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Year"
+                },
+                "y": {
+                  "fieldName": "sum(delay_min_per_flight)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Delay min per flight"
+                },
+                "color": {
+                  "fieldName": "cause",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Cause"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Delay minutes per operated flight, by cause and year",
+                "showDescription": true,
+                "description": "Normalized per flight, so years with different traffic are comparable."
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 1,
+            "width": 4,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "c_cause_carrier",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_cause_carrier",
+                  "fields": [
+                    {
+                      "name": "sum(delay_min_per_flight)",
+                      "expression": "SUM(`delay_min_per_flight`)"
+                    },
+                    {
+                      "name": "airline",
+                      "expression": "`airline`"
+                    },
+                    {
+                      "name": "cause",
+                      "expression": "`cause`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "sum(delay_min_per_flight)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Delay min per flight"
+                },
+                "y": {
+                  "fieldName": "airline",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Airline"
+                },
+                "color": {
+                  "fieldName": "cause",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Cause"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Delay profile of the 10 largest airlines — latest year",
+                "showDescription": true,
+                "description": "Carrier + late-aircraft = airline-controllable. NAS + weather = system / external."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 6,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "p_bottlenecks",
+      "displayName": "4 · Airport & Time Bottlenecks",
+      "layout": [
+        {
+          "widget": {
+            "name": "t_bott",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Where and when do delays build up?\nBusiest airports and departure hours in the latest year. Use it to target schedule buffers, staffing and turn times."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "c_airport_delay",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_airport_top",
+                  "fields": [
+                    {
+                      "name": "airport",
+                      "expression": "`airport`"
+                    },
+                    {
+                      "name": "sum(avg_dep_delay_min)",
+                      "expression": "SUM(`avg_dep_delay_min`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "airport",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Airport"
+                },
+                "y": {
+                  "fieldName": "sum(avg_dep_delay_min)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Avg departure delay (min)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Average departure delay — 15 busiest airports",
+                "showDescription": true,
+                "description": "Weighted by scheduled departures, latest year."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "c_hour_profile",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_hour_profile",
+                  "fields": [
+                    {
+                      "name": "dep_hour",
+                      "expression": "`dep_hour`"
+                    },
+                    {
+                      "name": "sum(avg_dep_delay_min)",
+                      "expression": "SUM(`avg_dep_delay_min`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "dep_hour",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Scheduled departure hour"
+                },
+                "y": {
+                  "fieldName": "sum(avg_dep_delay_min)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Avg departure delay (min)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Delay builds through the day — network",
+                "showDescription": true,
+                "description": "Delays propagate: late inbound aircraft push later departures further behind."
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 1,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "c_heat",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_airport_hour_heat",
+                  "fields": [
+                    {
+                      "name": "dep_hour",
+                      "expression": "`dep_hour`"
+                    },
+                    {
+                      "name": "airport",
+                      "expression": "`airport`"
+                    },
+                    {
+                      "name": "sum(avg_dep_delay_min)",
+                      "expression": "SUM(`avg_dep_delay_min`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "heatmap",
+              "encodings": {
+                "x": {
+                  "fieldName": "dep_hour",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Departure hour"
+                },
+                "y": {
+                  "fieldName": "airport",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Airport"
+                },
+                "color": {
+                  "fieldName": "sum(avg_dep_delay_min)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Avg departure delay (min)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Hotspots — 10 busiest airports × departure hour",
+                "showDescription": true,
+                "description": "Darker = longer average departure delay. 05:00–23:00, latest year."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_peak",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_peak_gap",
+                  "fields": [
+                    {
+                      "name": "airport",
+                      "expression": "`airport`"
+                    },
+                    {
+                      "name": "airport_name",
+                      "expression": "`airport_name`"
+                    },
+                    {
+                      "name": "worst_hour",
+                      "expression": "`worst_hour`"
+                    },
+                    {
+                      "name": "worst_hour_avg_delay_min",
+                      "expression": "`worst_hour_avg_delay_min`"
+                    },
+                    {
+                      "name": "best_hour",
+                      "expression": "`best_hour`"
+                    },
+                    {
+                      "name": "best_hour_avg_delay_min",
+                      "expression": "`best_hour_avg_delay_min`"
+                    },
+                    {
+                      "name": "peak_gap_min",
+                      "expression": "`peak_gap_min`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "airport",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "Airport",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Airport"
+                  },
+                  {
+                    "fieldName": "airport_name",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "Name",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Name"
+                  },
+                  {
+                    "fieldName": "worst_hour",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "Worst hour",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Worst hour"
+                  },
+                  {
+                    "fieldName": "worst_hour_avg_delay_min",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100003,
+                    "title": "Worst-hour delay (min)",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Worst-hour delay (min)",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "best_hour",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100004,
+                    "title": "Best hour",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Best hour"
+                  },
+                  {
+                    "fieldName": "best_hour_avg_delay_min",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100005,
+                    "title": "Best-hour delay (min)",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Best-hour delay (min)",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "peak_gap_min",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100006,
+                    "title": "Peak gap (min)",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Peak gap (min)",
+                    "numberFormat": "0.00"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Peak-hour gap — where schedule buffers matter most",
+                "showDescription": true,
+                "description": "Hours with ≥300 departures. Large gap = delay is time-of-day driven, not airport-wide."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 15,
+            "width": 6,
+            "height": 7
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "p_weather",
+      "displayName": "5 · Weather Impact",
+      "layout": [
+        {
+          "widget": {
+            "name": "t_wx",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## How much does weather hurt?\nDaily airport performance joined to NOAA station observations for the 10 airports with mapped weather stations. Baseline = dry days at the same airports."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "k_wx_snow",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_weather_headline",
+                  "fields": [
+                    {
+                      "name": "sum(snow_cancel_multiplier)",
+                      "expression": "SUM(`snow_cancel_multiplier`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(snow_cancel_multiplier)",
+                  "displayName": "Snow-day cancellation rate vs dry (×)",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "none",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Snow-day cancellation rate vs dry (×)",
+                "showDescription": true,
+                "description": "How many times the dry-day cancellation rate"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_wx_rain",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_weather_headline",
+                  "fields": [
+                    {
+                      "name": "sum(heavy_rain_cancel_multiplier)",
+                      "expression": "SUM(`heavy_rain_cancel_multiplier`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(heavy_rain_cancel_multiplier)",
+                  "displayName": "Heavy-rain cancellation rate vs dry (×)",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "none",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Heavy-rain cancellation rate vs dry (×)",
+                "showDescription": true,
+                "description": "Days with ≥10 mm precipitation"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 1,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_wx_delay",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_weather_headline",
+                  "fields": [
+                    {
+                      "name": "sum(snow_extra_delay_min)",
+                      "expression": "SUM(`snow_extra_delay_min`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(snow_extra_delay_min)",
+                  "displayName": "Extra departure delay on snow days (min)",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "none",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Extra departure delay on snow days (min)",
+                "showDescription": true,
+                "description": "Avg departure delay, snow day minus dry day"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 1,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "c_wx_cxl",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_weather_condition",
+                  "fields": [
+                    {
+                      "name": "weather_condition",
+                      "expression": "`weather_condition`"
+                    },
+                    {
+                      "name": "sum(cancellation_pct)",
+                      "expression": "SUM(`cancellation_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "weather_condition",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Weather"
+                },
+                "y": {
+                  "fieldName": "sum(cancellation_pct)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Cancellation %"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cancellation rate by weather condition"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "c_wx_delay",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_weather_condition",
+                  "fields": [
+                    {
+                      "name": "weather_condition",
+                      "expression": "`weather_condition`"
+                    },
+                    {
+                      "name": "sum(avg_dep_delay_min)",
+                      "expression": "SUM(`avg_dep_delay_min`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "weather_condition",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Weather"
+                },
+                "y": {
+                  "fieldName": "sum(avg_dep_delay_min)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Avg departure delay (min)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Average departure delay by weather condition"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 4,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "c_wx_heat",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_weather_airport",
+                  "fields": [
+                    {
+                      "name": "weather_condition",
+                      "expression": "`weather_condition`"
+                    },
+                    {
+                      "name": "airport",
+                      "expression": "`airport`"
+                    },
+                    {
+                      "name": "sum(cancellation_pct)",
+                      "expression": "SUM(`cancellation_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "heatmap",
+              "encodings": {
+                "x": {
+                  "fieldName": "weather_condition",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Weather"
+                },
+                "y": {
+                  "fieldName": "airport",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Airport"
+                },
+                "color": {
+                  "fieldName": "sum(cancellation_pct)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Cancellation %"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Weather sensitivity by airport — cancellation %",
+                "showDescription": true,
+                "description": "Airports that degrade most in snow or heavy rain need the strongest contingency plans."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 10,
+            "width": 6,
+            "height": 6
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "p_trust",
+      "displayName": "6 · Data Trust",
+      "layout": [
+        {
+          "widget": {
+            "name": "t_trust",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Can we trust these numbers?\nEvery monthly file is reconciled (expected rows = Bronze = Silver + quarantine) and must pass the quality gate before a release is certified. Only certified data reaches this dashboard."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "k_t_gold",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_trust_kpi",
+                  "fields": [
+                    {
+                      "name": "sum(gold_flights)",
+                      "expression": "SUM(`gold_flights`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(gold_flights)",
+                  "displayName": "Flights in Gold",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Flights in Gold",
+                "showDescription": true,
+                "description": "Matches de-duplicated Silver"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_t_rel",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_trust_kpi",
+                  "fields": [
+                    {
+                      "name": "sum(certified_releases)",
+                      "expression": "SUM(`certified_releases`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(certified_releases)",
+                  "displayName": "Certified releases",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "none",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Certified releases"
+              }
+            }
+          },
+          "position": {
+            "x": 1,
+            "y": 1,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_t_ok",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_trust_kpi",
+                  "fields": [
+                    {
+                      "name": "sum(periods_reconciled)",
+                      "expression": "SUM(`periods_reconciled`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(periods_reconciled)",
+                  "displayName": "Months reconciled OK",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "none",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Months reconciled OK"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 1,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_t_mis",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_trust_kpi",
+                  "fields": [
+                    {
+                      "name": "sum(open_mismatches)",
+                      "expression": "SUM(`open_mismatches`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(open_mismatches)",
+                  "displayName": "Open mismatches",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "none",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Open mismatches",
+                "showDescription": true,
+                "description": "Latest check per month not OK"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 1,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_t_q",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_trust_kpi",
+                  "fields": [
+                    {
+                      "name": "sum(quarantine_rate)",
+                      "expression": "SUM(`quarantine_rate`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(quarantine_rate)",
+                  "displayName": "Quarantine rate",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Quarantine rate",
+                "showDescription": true,
+                "description": "Gate threshold: 2%"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 1,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "k_t_inc",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_trust_kpi",
+                  "fields": [
+                    {
+                      "name": "sum(incidents_raised)",
+                      "expression": "SUM(`incidents_raised`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(incidents_raised)",
+                  "displayName": "Incidents raised",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "none",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Incidents raised",
+                "showDescription": true,
+                "description": "Loads blocked by the quality gate"
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 1,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_release2",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_release",
+                  "fields": [
+                    {
+                      "name": "last_certified_at",
+                      "expression": "`last_certified_at`"
+                    },
+                    {
+                      "name": "certified_releases",
+                      "expression": "`certified_releases`"
+                    },
+                    {
+                      "name": "last_periods",
+                      "expression": "`last_periods`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "last_certified_at",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "Last certified at",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Last certified at"
+                  },
+                  {
+                    "fieldName": "certified_releases",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "Certified releases",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Certified releases",
+                    "numberFormat": "0,0"
+                  },
+                  {
+                    "fieldName": "last_periods",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "Periods in last release",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Periods in last release"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Latest certified release"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 6,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "c_recon_bar",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_recon",
+                  "fields": [
+                    {
+                      "name": "month",
+                      "expression": "`month`"
+                    },
+                    {
+                      "name": "sum(silver_rows)",
+                      "expression": "SUM(`silver_rows`)"
+                    },
+                    {
+                      "name": "status",
+                      "expression": "`status`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "month",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Month"
+                },
+                "y": {
+                  "fieldName": "sum(silver_rows)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Silver rows"
+                },
+                "color": {
+                  "fieldName": "status",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Status"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Rows loaded per month, coloured by reconciliation status"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_recon",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_recon",
+                  "fields": [
+                    {
+                      "name": "period",
+                      "expression": "`period`"
+                    },
+                    {
+                      "name": "dataset",
+                      "expression": "`dataset`"
+                    },
+                    {
+                      "name": "expected_rows",
+                      "expression": "`expected_rows`"
+                    },
+                    {
+                      "name": "bronze_rows",
+                      "expression": "`bronze_rows`"
+                    },
+                    {
+                      "name": "silver_rows",
+                      "expression": "`silver_rows`"
+                    },
+                    {
+                      "name": "quarantined_rows",
+                      "expression": "`quarantined_rows`"
+                    },
+                    {
+                      "name": "status",
+                      "expression": "`status`"
+                    },
+                    {
+                      "name": "checked_at",
+                      "expression": "`checked_at`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "period",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "Period",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Period"
+                  },
+                  {
+                    "fieldName": "dataset",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "Dataset",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Dataset"
+                  },
+                  {
+                    "fieldName": "expected_rows",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "Expected (source)",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Expected (source)",
+                    "numberFormat": "0,0"
+                  },
+                  {
+                    "fieldName": "bronze_rows",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100003,
+                    "title": "Bronze",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Bronze",
+                    "numberFormat": "0,0"
+                  },
+                  {
+                    "fieldName": "silver_rows",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100004,
+                    "title": "Silver clean",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Silver clean",
+                    "numberFormat": "0,0"
+                  },
+                  {
+                    "fieldName": "quarantined_rows",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100005,
+                    "title": "Quarantined",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Quarantined",
+                    "numberFormat": "0,0"
+                  },
+                  {
+                    "fieldName": "status",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100006,
+                    "title": "Status",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Status"
+                  },
+                  {
+                    "fieldName": "checked_at",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100007,
+                    "title": "Checked at",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "Checked at"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Reconciliation log — latest check per month"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 6,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    }
+  ]
+}
